@@ -54,6 +54,11 @@ interface GenerationProgress {
   progress: { value: number; max: number };
   nodeProgress: { completed: number; total: number };
   downloadProgress: number;
+  /**
+   * Latest sampler preview frame as a data URL. Rendered in the same slot the
+   * finished results take — it is display-only and never joins the results.
+   */
+  previewMedia: string | null;
 }
 
 const GenerationStatusContext = createContext<GenerationStatus | null>(null);
@@ -64,6 +69,7 @@ const INITIAL_PROGRESS: GenerationProgress = {
   progress: { value: 0, max: 0 },
   nodeProgress: { completed: 0, total: 0 },
   downloadProgress: 0,
+  previewMedia: null,
 };
 
 // Minimum percentage change to trigger a sampler progress re-render
@@ -147,6 +153,16 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   const handleNodeProgress = useCallback(
     (completed: number, total: number) => {
       setActiveProgress(() => ({ nodeProgress: { completed, total } }));
+    },
+    [setActiveProgress],
+  );
+
+  // Sampler preview frames arrive once per step during sampling. They occupy
+  // the result slot while sampling runs and are replaced by the real results
+  // afterwards; they are never added to `generatedMedia`.
+  const handlePreview = useCallback(
+    (dataUrl: string) => {
+      setActiveProgress(() => ({ previewMedia: dataUrl }));
     },
     [setActiveProgress],
   );
@@ -330,6 +346,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         try {
           await client.awaitCompletion(promptId, workflowForExecution, {
             onProgress: handleProgress,
+            onPreview: handlePreview,
             onNodeStart: (nodeId) => {
               setGeneratingStatus(() => ({ currentNodeId: nodeId }));
             },

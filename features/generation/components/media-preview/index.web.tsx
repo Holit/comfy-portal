@@ -55,7 +55,7 @@ export const MediaPreview = memo(function ParallaxMedia({
   serverId,
 }: ParallaxMediaProps) {
   const { generatedMedia, status } = useGenerationStatus();
-  const { progress } = useGenerationProgress();
+  const { progress, previewMedia } = useGenerationProgress();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [showActionsheet, setShowActionsheet] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -98,7 +98,22 @@ export const MediaPreview = memo(function ParallaxMedia({
 
   return (
     <View className="relative w-full flex-1 flex-col items-start justify-start">
-      {generatedMedia.length > 0 ? (
+      {previewMedia ? (
+        // Sampling in progress: the sampler's preview frame takes the result
+        // slot. Display-only — it never joins `generatedMedia`.
+        <View className="h-full w-full items-center justify-center">
+          <img
+            src={previewMedia}
+            style={{
+              width: screenWidth,
+              height: screenHeight,
+              objectFit: 'contain',
+              objectPosition: 'top',
+            }}
+            alt="Sampler preview"
+          />
+        </View>
+      ) : generatedMedia.length > 0 ? (
         <View className="h-auto w-full flex-1 justify-start">
           <ScrollView
             key={generatedMedia.join('-')}

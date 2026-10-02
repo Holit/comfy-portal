@@ -38,6 +38,7 @@ import VAEEncodeForInpaint from './base/VAEEncodeForInpaint';
 import VAELoader from './base/VAELoader';
 import WanImageToVideo from './base/WanImageToVideo';
 import ImageResizeKJv2 from './kj-nodes/ImageResizeKJv2';
+import TextEncodeQwenImage21 from './base/TextEncodeQwenImage21';
 import MiniMaxH3Easy from './minimax-h3-easy/MiniMaxH3Easy';
 import MiniMaxH3EasyLoader from './minimax-h3-easy/MiniMaxH3EasyLoader';
 import MiniMaxH3EasyMediaBridge from './minimax-h3-easy/MiniMaxH3EasyMediaBridge';
@@ -89,6 +90,7 @@ export const nodeComponentMap: Record<string, ComponentType<NodeContentProps>> =
   'ImageScaleBy': ImageScaleBy,
   'ImageResizeKJv2': ImageResizeKJv2,
   'TextEncodeQwenImageEditPlus': TextEncodeQwenImageEditPlus,
+  'TextEncodeQwenImage21': TextEncodeQwenImage21,
   'GetImageSize': ImmutableNode,
 
   // ComfyUI-MiniMaxH3-Easy. The remaining four nodes only take links, so they

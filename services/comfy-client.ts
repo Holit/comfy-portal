@@ -48,6 +48,124 @@ interface ProgressCallback {
    */
   onDownloadProgress?: (filename: string, progress: number) => void;
 
+  /**
+   * Called for each sampler preview frame.
+   * @param dataUrl - The frame as a `data:` URL, ready for an Image source
+   * @param nodeId - Id of the sampler node the frame came from, when known
+   */
+  onPreview?: (dataUrl: string, nodeId?: string) => void;
+
+}
+
+// ---------------------------------------------------------------------------
+// Sampler preview frames
+//
+// ComfyUI only emits these to clients that declare `supports_preview_metadata`
+// as the first message on the socket — see setupWebSocket. The server never
+// falls back to the legacy format, so without the declaration no preview is
+// sent at all.
+// ---------------------------------------------------------------------------
+
+/** event 1 = PREVIEW_IMAGE */
+const PREVIEW_IMAGE = 1;
+/** event 4 = PREVIEW_IMAGE_WITH_METADATA */
+const PREVIEW_IMAGE_WITH_METADATA = 4;
+
+/** Floor between two rendered preview frames; see handlePreviewFrame. */
+const PREVIEW_MIN_INTERVAL_MS = 150;
+
+/**
+ * Dev-only: mirrors received frames to a local sink so they can be compared
+ * byte-for-byte with a browser session. Off by default — nothing in the app
+ * depends on it, and enabling it doubles the per-frame base64 payload.
+ */
+const PROBE_ENABLED = false;
+const PROBE_SINK = 'http://10.0.2.2:8197';
+let probeSeq = 0;
+
+function probeSend(data: unknown) {
+  fetch(PROBE_SINK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }).catch(() => {});
+}
+
+function toBase64(bytes: Uint8Array): string {
+  const CHARS =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = bytes[i + 1];
+    const b2 = bytes[i + 2];
+    out += CHARS[b0 >> 2];
+    out += CHARS[((b0 & 3) << 4) | ((b1 ?? 0) >> 4)];
+    out += i + 1 < bytes.length ? CHARS[((b1 & 15) << 2) | ((b2 ?? 0) >> 6)] : '=';
+    out += i + 2 < bytes.length ? CHARS[b2 & 63] : '=';
+  }
+  return out;
+}
+
+interface ParsedPreviewFrame {
+  event: number;
+  meta: string | null;
+  metaJson: any;
+  mime: string;
+  data: Uint8Array;
+}
+
+/**
+ * Decodes a ComfyUI binary preview frame.
+ *
+ *   event 4 (PREVIEW_IMAGE_WITH_METADATA):
+ *     u32 event | u32 metadata length | JSON metadata | image data
+ *   event 1 (PREVIEW_IMAGE):
+ *     u32 event | u32 image type (1 = JPEG, 2 = PNG) | image data
+ *
+ * The image itself is located by magic bytes instead of trusting the declared
+ * lengths, so a frame we misparse degrades to "ignored" rather than to garbage.
+ */
+function parsePreviewFrame(buffer: ArrayBuffer): ParsedPreviewFrame | null {
+  if (buffer.byteLength < 8) return null;
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const event = view.getUint32(0, false);
+  if (event !== PREVIEW_IMAGE && event !== PREVIEW_IMAGE_WITH_METADATA) return null;
+
+  let meta: string | null = null;
+  let metaJson: any = null;
+  if (event === PREVIEW_IMAGE_WITH_METADATA) {
+    const metaLen = view.getUint32(4, false);
+    if (8 + metaLen > buffer.byteLength) return null;
+    meta = new TextDecoder().decode(bytes.subarray(8, 8 + metaLen));
+    try {
+      metaJson = JSON.parse(meta);
+    } catch {
+      metaJson = null;
+    }
+  }
+
+  let start = -1;
+  let mime = 'image/jpeg';
+  for (let i = 0; i + 3 < bytes.length; i++) {
+    if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) {
+      start = i;
+      mime = 'image/jpeg';
+      break;
+    }
+    if (
+      bytes[i] === 0x89 && bytes[i + 1] === 0x50 &&
+      bytes[i + 2] === 0x4e && bytes[i + 3] === 0x47
+    ) {
+      start = i;
+      mime = 'image/png';
+      break;
+    }
+  }
+  if (start < 0) return null;
+
+  return { event, meta, metaJson, mime, data: bytes.subarray(start) };
 }
 
 /**
@@ -126,6 +244,9 @@ export class ComfyClient {
   private activePromptId: string | null = null;
   private readonly TIMEOUT_MS = 600_000; // 10 minutes with no activity
   private timeoutCheckInterval: NodeJS.Timeout | null = null;
+
+  /** Timestamp of the last preview frame we forwarded; see handlePreviewFrame. */
+  private lastPreviewAt: number = 0;
 
   /** Persistent callback for queue status updates — fires on every WS 'status' message */
   onQueueUpdate?: (queueRemaining: number) => void;
@@ -206,9 +327,26 @@ export class ComfyClient {
   private setupWebSocket(wsUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(wsUrl);
+      this.ws.binaryType = 'arraybuffer';
 
       this.ws.onopen = () => {
         this.reconnectAttempts = 0;
+        // ComfyUI only emits sampler previews to clients that declare this
+        // capability, and it must be the first message on the socket.
+        // Without it the server sends no PREVIEW_IMAGE frames at all.
+        try {
+          this.ws?.send(
+            JSON.stringify({
+              type: 'feature_flags',
+              data: {
+                supports_preview_metadata: true,
+                supports_progress_text_metadata: true,
+              },
+            }),
+          );
+        } catch {
+          // A failed capability declaration must not break the connection.
+        }
         resolve();
       };
 
@@ -376,9 +514,70 @@ export class ComfyClient {
     return undefined;
   }
 
+  /**
+   * Handles a sampler preview frame: decodes it and hands it to the tracked
+   * generation as a ready-to-render data URL.
+   *
+   * Frames are throttled to PREVIEW_MIN_INTERVAL_MS. A 25-step run arrives over
+   * tens of seconds while each frame carries ~40 KB of JPEG; forwarding every
+   * one re-renders the preview that many times and allocates a megabyte of
+   * string per frame. The last frame is cheap to lose — the finished result
+   * replaces the preview immediately afterwards.
+   *
+   * Frames are also mirrored to the probe sink while the preview UI is being
+   * validated against a browser session.
+   */
+  private handlePreviewFrame = (buffer: ArrayBuffer) => {
+    const frame = parsePreviewFrame(buffer);
+    if (!frame) return;
+
+    const tracked = this.findTracked();
+    if (!tracked) return;
+
+    // Frame identity is what matters for the throttle, so a dropped frame
+    // costs nothing but a skipped render.
+    const now = Date.now();
+    if (now - this.lastPreviewAt < PREVIEW_MIN_INTERVAL_MS) return;
+    this.lastPreviewAt = now;
+
+    const base64 = toBase64(frame.data);
+
+    if (PROBE_ENABLED) {
+      probeSeq += 1;
+      probeSend({
+        kind: 'frame',
+        seq: probeSeq,
+        ev: frame.event,
+        meta: frame.meta,
+        mime: frame.mime,
+        bytes: frame.data.byteLength,
+        b64: base64,
+      });
+    }
+
+    tracked.callbacks.onPreview?.(
+      `data:${frame.mime};base64,${base64}`,
+      frame.metaJson?.node_id,
+    );
+    this.touchActivity(tracked.promptId);
+  };
+
   private handleMessage = (event: MessageEvent) => {
     try {
-      if (typeof event.data !== 'string' || event.data.startsWith('o') || event.data === '[]' || event.data.startsWith('primus')) {
+      // Binary frames are sampler previews, never JSON. They arrive as
+      // ArrayBuffer because binaryType is set in setupWebSocket; a Blob is
+      // handled defensively since the platform is allowed to ignore that.
+      if (event.data instanceof ArrayBuffer) {
+        this.handlePreviewFrame(event.data);
+        return;
+      }
+      if (typeof event.data !== 'string') {
+        if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
+          void event.data.arrayBuffer().then((buf) => this.handlePreviewFrame(buf));
+        }
+        return;
+      }
+      if (event.data.startsWith('o') || event.data === '[]' || event.data.startsWith('primus')) {
         return;
       }
 

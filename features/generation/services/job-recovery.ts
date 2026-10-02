@@ -7,6 +7,7 @@ import { showToast } from '@/utils/toast';
 import { Platform } from 'react-native';
 
 import { PendingJob, getPendingJobs, usePendingJobsStore } from '../stores/pending-jobs-store';
+import { stashRecoveredMedia } from '../stores/recovered-media-store';
 
 /**
  * Keeps generations alive independently of the React tree.
@@ -206,8 +207,7 @@ export async function finalizeJob(
 
     // Everything the server had for this prompt is now on disk.
     usePendingJobsStore.getState().removeJob(promptId);
-    return savedPaths;
-  } finally {
+    return savedPaths;  } finally {
     finalizing.delete(promptId);
   }
 }
@@ -333,7 +333,15 @@ async function reconcileServer(serverId: string): Promise<boolean> {
       // still has the outputs of every node that finished before it stopped.
       // finalizeJob retires the job once they're saved.
       // history entry shape: prompt = [number, prompt_id, workflow, ...]
-      await finalizeJob(job, { workflow: entry?.prompt?.[2] });
+      const savedPaths = await finalizeJob(job, { workflow: entry?.prompt?.[2] });
+      // Hand what this pass recovered to the UI. It cannot be pushed straight
+      // to the run screen: the screen's provider is unmounted whenever the app
+      // was backgrounded or the user navigated away, which is exactly when
+      // recovery runs. Stashing it lets whichever screen shows that workflow
+      // pick it up — see recovered-media-store.
+      if (savedPaths && savedPaths.length > 0) {
+        stashRecoveredMedia(job.serverId, job.workflowId, savedPaths);
+      }
     } catch (error) {
       // Keep the job pending and make sure another pass actually happens.
       console.warn('Failed to finalize recovered job', job.promptId, error);

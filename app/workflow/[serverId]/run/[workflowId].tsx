@@ -20,6 +20,7 @@ import { Colors } from '@/constants/Colors';
 import NodeComponent from '@/features/comfy-node/components/node';
 import { AIChatTab, AIChatTabRef } from '@/features/ai-assistant/components/ai-chat-tab';
 import { MediaPreview } from '@/features/generation/components/media-preview';
+import { RecoveredMediaBridge } from '@/features/generation/components/recovered-media-bridge';
 import { AdaptiveKeyboardAwareScrollView, AdaptiveTextInput } from '@/components/self-ui/adaptive-sheet-components';
 import { BottomSheetProvider } from '@/context/bottom-sheet-context';
 import { GenerationProvider, useGenerationActions } from '@/features/generation/context/generation-context';
@@ -387,7 +388,22 @@ function RunWorkflowScreenContent() {
 export default function RunWorkflowScreen() {
   return (
     <GenerationProvider>
+      <RecoveredMediaBridgeRoute />
       <RunWorkflowScreenContent />
     </GenerationProvider>
   );
+}
+
+/**
+ * Wires recovered results to the screen's params. It has to sit inside the
+ * provider (for `setGeneratedMedia`) and outside `RunWorkflowScreenContent`
+ * (which only reads them), so the params are read here.
+ */
+function RecoveredMediaBridgeRoute() {
+  const { serverId, workflowId } = useLocalSearchParams<{
+    serverId: string;
+    workflowId: string;
+  }>();
+  if (!serverId || !workflowId) return null;
+  return <RecoveredMediaBridge serverId={serverId} workflowId={workflowId} />;
 }

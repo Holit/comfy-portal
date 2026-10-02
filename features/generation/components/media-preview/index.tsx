@@ -49,7 +49,7 @@ export const MediaPreview = memo(function ParallaxMedia({
   serverId,
 }: ParallaxMediaProps) {
   const { generatedMedia, status } = useGenerationStatus();
-  const { progress } = useGenerationProgress();
+  const { progress, previewMedia } = useGenerationProgress();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [showActionsheet, setShowActionsheet] = useState(false);
@@ -92,7 +92,24 @@ export const MediaPreview = memo(function ParallaxMedia({
         setContainerSize({ width, height });
       }}
     >
-      {generatedMedia.length > 0 ? (
+      {previewMedia ? (
+        // Sampling in progress: the sampler's own preview frame occupies the
+        // result slot, so the live image appears exactly where the finished one
+        // will. Display-only — it never joins `generatedMedia`.
+        <View className="h-full w-full items-center justify-center">
+          <Image
+            source={{ uri: previewMedia }}
+            style={{
+              width: containerSize.width || screenWidth,
+              height: containerSize.height || screenHeight,
+              aspectRatio: undefined,
+            }}
+            contentFit="contain"
+            contentPosition="top"
+            cachePolicy="none"
+          />
+        </View>
+      ) : generatedMedia.length > 0 ? (
         <View className="h-auto w-full flex-1 justify-start">
           <PagerView
             key={generatedMedia.join('-')}

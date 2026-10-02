@@ -42,6 +42,12 @@ export default function UnknownNode({ node, serverId, workflowId }: UnknownNodeP
     // Transport-only inputs the desktop UI hides too (e.g. MiniMax's 30
     // internal media sockets) — showing them would bury the real controls.
     if (spec && (spec.kind === 'link' || spec.hidden)) return false;
+    // Names the server's definition does not have. Frontend-only extension
+    // widgets leave these behind — alekpet's speech-to-text control writes a
+    // value into every text node, which reaches us as an input named
+    // `speak_and_recognation` that no node declares. We cannot render or send
+    // them meaningfully, so they would only show up as a stray JSON line.
+    if (schema && !spec && !schema.inputs[name.split('.')[0]]) return false;
     return true;
   });
 
